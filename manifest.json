@@ -1,0 +1,12 @@
+{
+    "display_name": "服务器文件管理",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "",
+    "author": "Daan",
+    "version": "1.0.0",
+    "homePage": "",
+    "auto_update": false
+}
