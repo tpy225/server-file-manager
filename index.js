@@ -135,6 +135,23 @@
     padding: 5px 8px; font-size: 13px; flex: 1; min-width: 140px; }
 .sfm-toolbar button { background: #2a3040; color: #e8eaf0; border: 1px solid #3a4150; border-radius: 6px;
     padding: 5px 10px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+.sfm-manual { display: none; padding: 8px 14px; border-bottom: 1px solid #3a4150; flex-direction: column; gap: 6px; }
+.sfm-manual.sfm-visible { display: flex; }
+.sfm-manual textarea { background: #151922; color: #e8eaf0; border: 1px solid #3a4150; border-radius: 6px;
+    padding: 6px 8px; font-size: 13px; width: 100%; box-sizing: border-box; resize: vertical; }
+.sfm-manual .sfm-manual-delete { align-self: flex-start; background: #2a3040; color: #e8eaf0;
+    border: 1px solid #3a4150; border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 13px; }
+.sfm-manual .sfm-manual-delete.sfm-armed { background: #a03030; border-color: #c04848; font-weight: 600; }
+.sfm-hint { padding: 10px 14px; font-size: 12px; color: #9aa3b5; line-height: 1.5; }
+.sfm-manual .sfm-hint { padding: 0; }
+.sfm-diag-title { padding: 14px; font-weight: 600; }
+.sfm-diag-row { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid #262c3a; }
+.sfm-diag-row .sfm-diag-name { flex: 1; font-size: 13px; }
+.sfm-diag-badge { font-size: 12px; padding: 2px 8px; border-radius: 8px; white-space: nowrap; }
+.sfm-diag-badge.ok { background: #1e3a2a; color: #6fce8f; }
+.sfm-diag-badge.miss { background: #3a1e1e; color: #d97070; }
+.sfm-diag-badge.warn { background: #3a3016; color: #d9b45a; }
+.sfm-diag-row .sfm-diag-status { color: #9aa3b5; font-size: 12px; white-space: nowrap; }
 .sfm-crumbs { padding: 8px 14px; font-size: 13px; color: #9aa3b5; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .sfm-crumbs span { cursor: pointer; }
 .sfm-crumbs span:hover { color: #e8eaf0; text-decoration: underline; }
@@ -201,7 +218,19 @@
         const goBtn = el('button', undefined, '跳转');
         const quickImages = el('button', undefined, '图片目录');
         const quickFiles = el('button', undefined, '文件目录');
-        toolbar.append(rootInput, goBtn, quickImages, quickFiles);
+        const diagBtn = el('button', undefined, '诊断');
+        const manualBtn = el('button', undefined, '按路径删');
+        toolbar.append(rootInput, goBtn, quickImages, quickFiles, diagBtn, manualBtn);
+
+        // 手动路径删除块（列表接口不可用时的兜底）
+        const manualBlock = el('div', 'sfm-manual');
+        const manualHint = el('div', 'sfm-hint', '每行一个路径，可粘贴图片地址（如 /user/images/xxx.png），将自动去掉开头斜杠后删除');
+        const manualInput = el('textarea');
+        manualInput.rows = 4;
+        manualInput.placeholder = 'user/images/xxx.png';
+        const manualDeleteBtn = el('button', undefined, '删除上述路径');
+        manualDeleteBtn.className = 'sfm-manual-delete';
+        manualBlock.append(manualHint, manualInput, manualDeleteBtn);
 
         // 面包屑
         const crumbs = el('div', 'sfm-crumbs');
@@ -220,11 +249,12 @@
         deleteBtn.id = 'sfm-delete-btn';
         footer.append(selectAllLabel, countLabel, deleteBtn);
 
-        panel.append(header, toolbar, crumbs, list, footer);
+        panel.append(header, toolbar, manualBlock, crumbs, list, footer);
         overlay.appendChild(panel);
         document.body.appendChild(overlay);
 
-        refs = { overlay, rootInput, crumbs, list, selectAll, countLabel, deleteBtn };
+        refs = { overlay, rootInput, crumbs, list, selectAll, countLabel, deleteBtn,
+            manualBlock, manualInput, manualDeleteBtn, diagBtn, manualBtn };
 
         // 事件
         goBtn.addEventListener('click', () => {
@@ -235,6 +265,11 @@
         });
         quickImages.addEventListener('click', () => switchRoot('user/images'));
         quickFiles.addEventListener('click', () => switchRoot('user/files'));
+        diagBtn.addEventListener('click', () => runDiagnostics());
+        manualBtn.addEventListener('click', () => {
+            refs.manualBlock.classList.toggle('sfm-visible');
+        });
+        manualDeleteBtn.addEventListener('click', () => deleteManualPaths());
         selectAll.addEventListener('change', () => {
             if (selectAll.checked) {
                 for (const entry of state.entries) {
@@ -371,6 +406,100 @@
         const n = state.selected.size;
         refs.countLabel.textContent = n ? `已选择 ${n} 项` : '未选择';
         refs.deleteBtn.disabled = n === 0;
+    }
+
+    // ---------- 端点诊断：探测服务端实现了哪些文件接口 ----------
+
+    async function probeEndpoint(label, endpoint, body) {
+        try {
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: { ...getRequestHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify(body ?? {}),
+            });
+            let note = '';
+            if (endpoint === '/api/files/delete' && response.status === 400) {
+                note = '（可能未开启 enableServerFilesDeleting）';
+            }
+            return { label, status: response.status, ok: response.ok, note };
+        } catch (error) {
+            return { label, status: 'ERR', ok: false, note: error.message };
+        }
+    }
+
+    async function runDiagnostics() {
+        refs.list.textContent = '';
+        refs.crumbs.textContent = '';
+        refs.list.appendChild(el('div', 'sfm-empty', '诊断中…'));
+        const results = await Promise.all([
+            probeEndpoint('基线：POST /api/settings/get', '/api/settings/get'),
+            probeEndpoint('列表：POST /api/files/get', '/api/files/get', { path: '' }),
+            probeEndpoint('删除：POST /api/files/delete', '/api/files/delete', { path: '__sfm_probe__/../__sfm_probe__.tmp' }),
+            probeEndpoint('上传：POST /api/files/upload', '/api/files/upload', { name: '__sfm_probe__', data: '' }),
+            probeEndpoint('目录：POST /api/files/create-folder', '/api/files/create-folder', { name: '__sfm_probe__' }),
+        ]);
+        refs.list.textContent = '';
+        refs.list.appendChild(el('div', 'sfm-diag-title', '服务端接口探测结果'));
+        for (const result of results) {
+            const row = el('div', 'sfm-diag-row');
+            const verdict = result.ok ? '✓ 可用' : (result.status === 404 ? '✗ 未实现(404)' : '△ 存在，受限');
+            const badge = el('span', `sfm-diag-badge${result.ok ? ' ok' : result.status === 404 ? ' miss' : ' warn'}`, verdict);
+            row.append(el('span', 'sfm-diag-name', result.label), badge,
+                el('span', 'sfm-diag-status', String(result.status) + (result.note ? ' ' + result.note : '')));
+            refs.list.appendChild(row);
+        }
+        refs.list.appendChild(el('div', 'sfm-hint',
+            '判读：✓=接口正常；404=TT 服务端未实现该路由；其余状态码表示路由存在但有条件限制。基线不通说明请求通道异常。'));
+    }
+
+    // ---------- 手动路径删除（列表接口不可用时的兜底） ----------
+
+    async function deleteManualPaths() {
+        const manualDeleteBtn = refs.manualDeleteBtn;
+        const raw = refs.manualInput.value;
+        const targets = raw.split('\n')
+            .map(line => line.trim().replace(/^\/+/, ''))
+            .filter(Boolean);
+        if (!targets.length) {
+            showToast('请先输入要删除的路径');
+            return;
+        }
+        if (manualDeleteBtn.dataset.armed !== '1') {
+            manualDeleteBtn.dataset.armed = '1';
+            manualDeleteBtn.classList.add('sfm-armed');
+            manualDeleteBtn.textContent = `确认删除 ${targets.length} 项`;
+            window.setTimeout(() => {
+                manualDeleteBtn.dataset.armed = '0';
+                manualDeleteBtn.classList.remove('sfm-armed');
+                manualDeleteBtn.textContent = '删除上述路径';
+            }, 5000);
+            return;
+        }
+        manualDeleteBtn.dataset.armed = '0';
+        manualDeleteBtn.classList.remove('sfm-armed');
+        manualDeleteBtn.textContent = '删除上述路径';
+        manualDeleteBtn.disabled = true;
+        let deleted = 0;
+        const failures = [];
+        for (const target of targets) {
+            try {
+                await postJson('/api/files/delete', { path: target, recursive: true });
+                deleted += 1;
+            } catch (error) {
+                failures.push(`${target}：${error.message}`);
+                if (/\b400\b/.test(error.message)) {
+                    failures.push('（HTTP 400 通常表示服务端未开启 enableServerFilesDeleting）');
+                    break;
+                }
+            }
+        }
+        manualDeleteBtn.disabled = false;
+        if (failures.length) {
+            showToast(failures[0]);
+        } else {
+            showToast(`已删除 ${deleted} 项`);
+            refs.manualInput.value = '';
+        }
     }
 
     // ---------- 删除（两步确认，删除后不关面板、原地刷新） ----------
